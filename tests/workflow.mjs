@@ -74,6 +74,9 @@ assert.equal((await app.fetch(new Request('https://example.test/api/state?date='
 
 assert.equal((await view(employee)).role, 'employee', 'first visitor must not become manager');
 assert.equal((await view(manager)).role, 'manager');
+assert.deepEqual((await view(manager)).state.need, Array(12).fill(0), 'unset demand must not invent staffing targets');
+assert.deepEqual((await view(manager)).state.needConfigured, Array(12).fill(false));
+assert.equal((await (await call(manager, 'GET', '/api/week?start=' + today)).json()).days[0].coverage, null);
 assert.equal((await action(employee, 'rotateAttendanceCode')).status, 403);
 const codeResponse = await action(manager, 'rotateAttendanceCode');
 assert.equal(codeResponse.status, 200);
@@ -92,6 +95,7 @@ await view(colleague);
 assert.equal((await action(employee, 'setNeed', today, { hour: 12, count: 4 })).status, 403);
 assert.equal((await action(manager, 'setNeedRange', today, { start: 12, end: 16, count: 6 })).status, 200);
 assert.deepEqual((await view(manager)).state.need.slice(4, 8), [6, 6, 6, 6]);
+assert.deepEqual((await view(manager)).state.needConfigured.slice(4, 8), [true, true, true, true]);
 assert.equal((await action(employee, 'copyNeeds', tomorrow, { sourceDate: today })).status, 403);
 assert.equal((await action(manager, 'copyNeeds', tomorrow, { sourceDate: today })).status, 200);
 assert.deepEqual((await view(manager, tomorrow)).state.need, (await view(manager)).state.need);
