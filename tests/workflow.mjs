@@ -17,7 +17,7 @@ const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(x => x[1]);
 assert.equal(ids.length, new Set(ids).size, 'HTML IDs are unique');
 assert.match(html, /brand-logo/, 'redesigned shell is present');
 assert.match(clientScript, /api\/schedule/, 'live schedule is loaded');
-assert.doesNotMatch(clientScript, /login-manager|roleSwitch|nargiz_demo_/, 'demo role switching is absent');
+assert.doesNotMatch(clientScript, /login-manager|roleSwitch|_demo_/, 'demo role switching is absent');
 
 const db = new DatabaseSync(':memory:');
 for (const file of readdirSync('drizzle').filter(x => x.endsWith('.sql')).sort()) {
