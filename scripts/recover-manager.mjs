@@ -14,7 +14,6 @@ const sql=[
   `UPDATE password_accounts SET salt=${quote(salt)},password_hash=${quote(hash)},changed_at=${quote(new Date().toISOString())},must_change_password=1`,
   ` WHERE user_id='takt-primary-manager' AND username=${quote(username)} AND must_change_password=1`,
   ` AND EXISTS (SELECT 1 FROM members WHERE user_id='takt-primary-manager' AND role='manager' AND enabled=1);`,
-  `SELECT CASE WHEN EXISTS (SELECT 1 FROM password_accounts WHERE user_id='takt-primary-manager' AND salt=${quote(salt)} AND must_change_password=1) THEN 'reset-complete' ELSE 'reset-not-applied' END AS result;`,
   ''
 ].join('\n');
 mkdirSync('.wrangler',{recursive:true,mode:0o700});
