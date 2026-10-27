@@ -4,7 +4,9 @@
 
 [Открытая демоверсия для презентации](https://artemev009.github.io/takt-shifts/) — примерные данные, вход не требуется. Действия в демоверсии остаются в браузере посетителя.
 
-Рабочая версия с авторизацией: https://takt-shifts-2026.perospilsa.chatgpt.site
+Версия с серверной авторизацией через ChatGPT Sites (может требовать доступ к ChatGPT): https://takt-shifts-2026.perospilsa.chatgpt.site
+
+Самостоятельная версия без ChatGPT развёртывается на Cloudflare Worker по [инструкции](docs/STANDALONE-WEBAPP.md). До успешного запуска workflow и проверки `/healthz` независимый публичный адрес **не подтверждён**.
 
 ## Сценарий показа
 
