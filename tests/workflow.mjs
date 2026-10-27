@@ -95,6 +95,10 @@ assert.equal(manifest.start_url, '/');
 assert.match(await (await app.fetch(new Request('https://example.test/sw.js'), env)).text(), /clients\.claim/, 'service worker is served');
 assert.match(await (await call(employee, 'GET', '/')).text(), /Личный кабинет/);
 assert.equal((await app.fetch(new Request('https://example.test/api/state?date=' + today), env)).status, 401);
+const health = () => app.fetch(new Request('https://example.test/healthz'),env);
+assert.equal((await health()).status,503,'no manager password means not ready to pilot');
+assert.deepEqual(await (await health()).json(),{ready:false});
+assert.equal((await app.fetch(new Request('https://example.test/healthz'),{...env,DB:null})).status,503,'missing D1 is not ready');
 
 assert.equal((await view(employee)).role, 'employee', 'first visitor must not become manager');
 assert.equal((await view(manager)).role, 'manager');
@@ -115,6 +119,19 @@ const named = await app.fetch(new Request('https://example.test/api/state?date='
 } }), env);
 assert.equal((await named.json()).name, 'Иван Артемьев', 'profile uses signed-in display name');
 assert.equal((await view(manager)).role, 'manager', 'role still follows email');
+assert.equal((await health()).status,503,'SSO by itself is not enough for password-only pilots');
+assert.equal((await call(manager,'POST','/api/admin/password',{username:'pilot.manager',password:'SecureManager2026!'})).status,200,'manager sets password while trusted SSO is available');
+assert.equal((await health()).status,200,'D1 migrations and password-enabled manager are ready');
+assert.deepEqual(await (await health()).json(),{ready:true});
+const managerPasswordLogin=await app.fetch(new Request('https://example.test/api/auth/login',{
+  method:'POST',headers:{'content-type':'application/json'},
+  body:JSON.stringify({username:'pilot.manager',password:'SecureManager2026!'})
+}),{...env,TRUST_OAI_HEADERS:'false'});
+assert.equal(managerPasswordLogin.status,200,'manager can log in without ChatGPT SSO');
+const managerCookie=managerPasswordLogin.headers.get('set-cookie').split(';')[0];
+const managerPasswordAdmin=await app.fetch(new Request('https://example.test/api/admin/users',{headers:{cookie:managerCookie}}),{...env,TRUST_OAI_HEADERS:'false'});
+assert.equal(managerPasswordAdmin.status,200,'manager has admin rights with password-only session');
+assert.ok((await managerPasswordAdmin.json()).users.some(u=>u.role==='manager'&&u.username==='pilot.manager'));
 await view(colleague);
 assert.equal((await action(employee, 'setNeed', today, { hour: 12, count: 4 })).status, 403);
 assert.equal((await action(manager, 'setNeedRange', today, { start: 12, end: 16, count: 6 })).status, 200);
