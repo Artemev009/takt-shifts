@@ -251,6 +251,16 @@ assert.doesNotMatch(managerUi, /Алина Морозова|Даниил Вол�
  assert.equal((await action(manager,'setDepartmentNeed',tomorrow,{department:'alpha',hour:9,count:3})).status,200);
  let matrix=await (await call(employee,'GET','/api/department-coverage?date='+tomorrow)).json();
  assert.deepEqual(matrix.slots.find(x=>x.department==='alpha'&&x.hour===9),{department:'alpha',hour:9,required:3,assigned:0,shortage:3});
+ // A real exchange requires a claim and a manager decision before the roster changes.
+ assert.equal((await action(late,'offerShift',tomorrow)).status,200);
+ let offers=await (await call(colleague,'GET','/api/shift-market')).json();
+ const listing=offers.offers.find(x=>x.ownerId===late&&x.date===tomorrow);
+ assert.ok(listing&&listing.status==='open');
+ assert.equal((await action(colleague,'volunteerShift',tomorrow,{offerId:listing.id})).status,200);
+ assert.equal((await action(manager,'reviewShiftOffer',tomorrow,{offerId:listing.id,decision:'approve'})).status,200);
+ assert.equal((await view(colleague,tomorrow)).state.my.status,'approved');
+ assert.equal((await view(late,tomorrow)).state.my,null);
+ assert.ok(!(await (await call(manager,'GET','/api/shift-market')).json()).offers.some(x=>x.id===listing.id));
  const newStaff=await call(manager,'POST','/api/admin/users',{name:'Тестовый сотрудник',username:'pilot.staff',password:'SecurePilot2026!',department:'alpha',universal:true});
  assert.equal(newStaff.status,200);
  const staffId=(await newStaff.json()).id;
@@ -267,8 +277,15 @@ assert.doesNotMatch(managerUi, /Алина Морозова|Даниил Вол�
  matrix=await (await call(employee,'GET','/api/department-coverage?date='+tomorrow)).json();
  assert.equal(matrix.slots.find(x=>x.department==='alpha'&&x.hour===9).assigned,1);
  assert.equal((await sessionCall('GET','/api/admin/users')).status,403);
- const disabled=await call(manager,'POST','/api/admin/staff',{userId:staffId,department:'alpha',universal:true,enabled:false});
+  const night=addDays(tomorrow,1);
+ assert.equal((await sessionCall('POST','/api/action',{type:'book',date:night,start:22,end:30,department:'night'})).status,200);
+ assert.equal((await action(manager,'approve',night,{userId:staffId})).status,200);
+ let overnight=await (await call(manager,'GET','/api/department-coverage?date='+addDays(night,1))).json();
+ assert.equal(overnight.slots.find(x=>x.department==='night'&&x.hour===2).assigned,1,'overnight hours count on the next calendar date');
+const disabled=await call(manager,'POST','/api/admin/staff',{userId:staffId,department:'alpha',universal:true,enabled:false});
  assert.equal(disabled.status,200);
  assert.equal((await sessionCall('GET','/api/state?date='+tomorrow)).status,401,'disabled account loses session');
 
-console.log('Workflow checks passed');
+const untrusted=await app.fetch(new Request('https://example.test/api/admin/users',{headers:{'oai-authenticated-user-id':manager,'oai-authenticated-user-email':manager}}),{...env,TRUST_OAI_HEADERS:'false'});
+ assert.equal(untrusted.status,401,'SSO identity headers are rejected unless an authenticated trusted proxy is configured');
+ console.log('Workflow checks passed');
