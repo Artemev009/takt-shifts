@@ -114,7 +114,7 @@ assert.equal((await action(employee, 'book', today, { start: 11, end: 17 })).sta
 assert.equal((await action(manager, 'approve', today, { userId: employee })).status, 200);
 assert.equal((await action(manager, 'approve', today, { userId: employee })).status, 409);
 assert.equal((await view(manager)).state.people.length, 1);
-assert.equal((await call(employee, 'GET', '/api/schedule?start=' + today)).status, 403);
+assert.equal((await call(employee, 'GET', '/api/schedule?start=' + today)).status, 200, 'employees see the team schedule');
 const schedule = await (await call(manager, 'GET', '/api/schedule?start=' + today)).json();
 assert.equal(schedule.dates.length, 7);
 assert.equal(schedule.people[0].days[today].status, 'approved');
@@ -245,4 +245,30 @@ assert.match(employeeRequestsUi, /Моя доступность/);
 assert.match(employeeRequestsUi, /Пропущенная отметка/);
 assert.doesNotMatch(employeeUi, /Сотрудники и заявки/);
 assert.doesNotMatch(managerUi, /Алина Морозова|Даниил Волков/, 'prototype fixtures are absent');
+
+ // New pilot: department need, manager-issued password accounts, approval and shared schedules.
+ assert.equal((await action(employee,'setDepartmentNeed',tomorrow,{department:'alpha',hour:9,count:3})).status,403);
+ assert.equal((await action(manager,'setDepartmentNeed',tomorrow,{department:'alpha',hour:9,count:3})).status,200);
+ let matrix=await (await call(employee,'GET','/api/department-coverage?date='+tomorrow)).json();
+ assert.deepEqual(matrix.slots.find(x=>x.department==='alpha'&&x.hour===9),{department:'alpha',hour:9,required:3,assigned:0,shortage:3});
+ const newStaff=await call(manager,'POST','/api/admin/users',{name:'Тестовый сотрудник',username:'pilot.staff',password:'SecurePilot2026!',department:'alpha',universal:true});
+ assert.equal(newStaff.status,200);
+ const staffId=(await newStaff.json()).id;
+ assert.equal((await call(employee,'GET','/api/admin/users')).status,403,'only manager can list accounts');
+ const loginResponse=await app.fetch(new Request('https://example.test/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:'pilot.staff',password:'SecurePilot2026!'})}),env);
+ assert.equal(loginResponse.status,200,'staff can authenticate with real password');
+ const cookie=loginResponse.headers.get('set-cookie').split(';')[0];
+ async function sessionCall(method,path,body){
+   return app.fetch(new Request('https://example.test'+path,{method,headers:{cookie,...(body?{'content-type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})}),env)
+ }
+ assert.equal((await (await sessionCall('GET','/api/state?date='+tomorrow)).json()).role,'employee');
+ assert.equal((await sessionCall('POST','/api/action',{type:'book',date:tomorrow,start:9,end:15,department:'alpha'})).status,200);
+ assert.equal((await action(manager,'approve',tomorrow,{userId:staffId})).status,200);
+ matrix=await (await call(employee,'GET','/api/department-coverage?date='+tomorrow)).json();
+ assert.equal(matrix.slots.find(x=>x.department==='alpha'&&x.hour===9).assigned,1);
+ assert.equal((await sessionCall('GET','/api/admin/users')).status,403);
+ const disabled=await call(manager,'POST','/api/admin/staff',{userId:staffId,department:'alpha',universal:true,enabled:false});
+ assert.equal(disabled.status,200);
+ assert.equal((await sessionCall('GET','/api/state?date='+tomorrow)).status,401,'disabled account loses session');
+
 console.log('Workflow checks passed');
