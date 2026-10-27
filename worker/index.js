@@ -93,10 +93,10 @@ async function loginByPassword(db,request){
   stage='create-session-token';
   const token=randomHex(),digest=await hashSession(token);
   stage='write-session';
-  await db.prepare('INSERT INTO password_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(digest,account.user_id,new Date(Date.now()+24*3600000).toISOString(),now).run();
+  await db.prepare('INSERT INTO password_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(digest,account.user_id,new Date(Date.now()+90*24*3600000).toISOString(),now).run();
   stage='expire-old-sessions';
   await db.prepare('DELETE FROM password_sessions WHERE expires_at<?').bind(now).run();
-  return new Response(JSON.stringify({ok:true,mustChangePassword:!!account.must_change_password}),{status:200,headers:{...securityHeaders,'content-type':'application/json; charset=utf-8','cache-control':'no-store','set-cookie':cookieValue(token,86400)}});
+  return new Response(JSON.stringify({ok:true,mustChangePassword:!!account.must_change_password}),{status:200,headers:{...securityHeaders,'content-type':'application/json; charset=utf-8','cache-control':'no-store','set-cookie':cookieValue(token,90*86400)}});
   }catch(e){
     console.error('Takt login exception at '+stage, e instanceof Error?e.message:String(e));
     return fail('Сервер входа временно недоступен (AUTH_'+stage+'). Пароль не изменён.',503);
@@ -180,7 +180,7 @@ if(path==='/api/auth/change-password'&&request.method==='POST'){
   return json({ok:true});
 }
 const trustedSso=env.TRUST_OAI_HEADERS==='true';
-if(path==='/')return new Response(session?.member.mustChangePassword?changePasswordPage:session||trustedSso&&request.headers.get('oai-authenticated-user-id')?page:withPwa(loginPage),{headers:{...securityHeaders,'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});
+if(path==='/')return new Response(session?.member.mustChangePassword?changePasswordPage:session||trustedSso&&request.headers.get('oai-authenticated-user-id')?page:withPwa(loginPage.replace('Логин и временный пароль выдаёт руководитель','Логин и пароль выдаёт руководитель')),{headers:{...securityHeaders,'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});
 if(!path.startsWith('/api/'))return new Response('Not found',{status:404});
 const id=session?.id||(trustedSso?request.headers.get('oai-authenticated-user-id'):null);
 if(!id)return fail('Требуется вход',401);
@@ -191,6 +191,20 @@ const email=(request.headers.get('oai-authenticated-user-email')||'').slice(0,20
 let displayName=rawName;try{if(request.headers.get('oai-authenticated-user-full-name-encoding')==='percent-encoded-utf-8')displayName=decodeURIComponent(rawName)}catch{displayName=''}
 const m=session?session.member:await getMember(db,id,email,(displayName.trim()||email||'Сотрудник').slice(0,80),env.MANAGER_EMAIL);if(m.role==='blocked')return fail('Учётная запись отключена',403);if(path==='/api/shift-market'&&request.method==='GET')return json(await market(db,id,m.role));
 if(path==='/api/admin/users'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель',403);return json(await listUsers(db))}
+if(path==='/api/admin/roster'&&request.method==='POST'){
+  if(m.role!=='manager')return fail('Только руководитель',403);
+  let a;try{a=await request.json()}catch{return fail('Неверные данные')}
+  if(!Array.isArray(a.people)||a.people.length<1||a.people.length>100)return fail('Нужен список от 1 до 100 сотрудников');
+  const names=new Set();
+  for(const person of a.people){
+    if(typeof person?.name!=='string'||person.name.trim().length<2||person.name.trim().length>80||!DEPARTMENT_CODES.slice(0,4).includes(person.department)||typeof person.universal!=='boolean')return fail('Проверьте имена, отделы и допуски');
+    const key=person.name.trim().toLowerCase();if(names.has(key))return fail('Повторяется имя сотрудника: '+person.name);names.add(key);
+  }
+  const results=await db.batch(a.people.map((person,i)=>db.prepare("INSERT INTO members(user_id,name,role,department,universal,enabled) VALUES(?,?,'employee',?,?,1) ON CONFLICT(user_id) DO NOTHING").bind('prototype-'+String(i+1).padStart(3,'0'),person.name.trim(),person.department,person.universal?1:0)));
+  const added=results.reduce((sum,result)=>sum+(result.meta?.changes||0),0);
+  await audit(db,id,id,'roster_imported',null,{added,total:a.people.length});
+  return json({ok:true,added,total:a.people.length});
+}
 if(path==='/api/department-coverage'&&request.method==='GET'){const day=url.searchParams.get('date');if(!validDate(day))return fail('Укажите дату');return json(await deptCoverage(db,day))}
 if(path==='/api/admin/users'&&request.method==='POST'){
   if(m.role!=='manager')return fail('Только руководитель',403);
@@ -200,7 +214,7 @@ if(path==='/api/admin/users'&&request.method==='POST'){
   const duplicate=await db.prepare('SELECT username FROM password_accounts WHERE username=?').bind(username).first();if(duplicate)return fail('Этот логин занят',409);
   const idNew='staff-'+randomHex(12);
   await db.prepare("INSERT INTO members(user_id,name,role,department,universal,enabled) VALUES(?,?,'employee',?,?,1)").bind(idNew,name,department,universal?1:0).run();
-  if(!await upsertPassword(db,idNew,username,a.password,true))return fail('Не удалось создать пароль',409);
+  if(!await upsertPassword(db,idNew,username,a.password,false))return fail('Не удалось создать пароль',409);
   await audit(db,id,idNew,'staff_created',null,{department,universal});
   return json({ok:true,id:idNew});
 }
@@ -210,7 +224,7 @@ if(path==='/api/admin/password'&&request.method==='POST'){
   const userId=typeof a.userId==='string'?a.userId:id;
   const target=await db.prepare('SELECT user_id,role FROM members WHERE user_id=?').bind(userId).first();
   if(!target||target.role==='manager'&&target.user_id!==id)return fail('Нельзя изменить чужой аккаунт руководителя',403);
-  if(!await upsertPassword(db,userId,String(a.username||'').trim().toLowerCase(),a.password,target.user_id!==id))return fail('Логин занят или ненадёжный пароль');
+  if(!await upsertPassword(db,userId,String(a.username||'').trim().toLowerCase(),a.password,false))return fail('Логин занят или ненадёжный пароль');
   await audit(db,id,userId,'password_changed',null);
   return json({ok:true});
 }

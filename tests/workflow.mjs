@@ -331,12 +331,14 @@ assert.doesNotMatch(managerUi, /Алина Морозова|Даниил Вол�
  assert.equal((await call(employee,'GET','/api/admin/users')).status,403,'only manager can list accounts');
  const loginResponse=await app.fetch(new Request('https://example.test/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:'pilot.staff',password:'SecurePilot2026!'})}),env);
  assert.equal(loginResponse.status,200,'staff can authenticate with real password');
+ assert.equal((await loginResponse.clone().json()).mustChangePassword,false,'manager-issued password remains valid after first login');
+ assert.match(loginResponse.headers.get('set-cookie'),/Max-Age=7776000/,'login stays active for 90 days');
  const cookie=loginResponse.headers.get('set-cookie').split(';')[0];
  async function sessionCall(method,path,body){
    return app.fetch(new Request('https://example.test'+path,{method,headers:{cookie,...(body?{'content-type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})}),env)
  }
- assert.equal((await sessionCall('GET','/api/state?date='+tomorrow)).status,428,'temporary password must be changed before using the app');
- assert.match(await (await app.fetch(new Request('https://example.test/',{headers:{cookie}}),env)).text(),/Задайте личный пароль/);
+ assert.equal((await sessionCall('GET','/api/state?date='+tomorrow)).status,200,'employee can use the app without a second password');
+ assert.match(await (await app.fetch(new Request('https://example.test/',{headers:{cookie}}),env)).text(),/Управление сменами|Такт/);
  const changedPassword=await sessionCall('POST','/api/auth/change-password',{currentPassword:'SecurePilot2026!',newPassword:'FreshPilot2026!'});
  assert.equal(changedPassword.status,200);
  assert.equal((await (await sessionCall('GET','/api/state?date='+tomorrow)).json()).role,'employee');
@@ -345,6 +347,11 @@ assert.doesNotMatch(managerUi, /Алина Морозова|Даниил Вол�
  matrix=await (await call(employee,'GET','/api/department-coverage?date='+tomorrow)).json();
  assert.equal(matrix.slots.find(x=>x.department==='alpha'&&x.hour===9).assigned,1);
  assert.equal((await sessionCall('GET','/api/admin/users')).status,403);
+ assert.equal((await call(employee,'POST','/api/admin/roster',{people:[{name:'Тест Импорт',department:'mail',universal:false}]})).status,403);
+ const rosterImport=await call(manager,'POST','/api/admin/roster',{people:[{name:'Тест Импорт',department:'mail',universal:false}]});
+ assert.equal(rosterImport.status,200);
+ assert.equal((await rosterImport.json()).added,1);
+ assert.equal(db.prepare("SELECT COUNT(*) AS count FROM password_accounts WHERE user_id='prototype-001'").get().count,0,'roster import creates no login');
   const night=new Date(Date.parse(tomorrow)+86400000).toISOString().slice(0,10);
  assert.equal((await sessionCall('POST','/api/action',{type:'book',date:night,start:22,end:30,department:'night'})).status,200);
  assert.equal((await action(manager,'approve',night,{userId:staffId})).status,200);
