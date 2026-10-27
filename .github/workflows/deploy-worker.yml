@@ -1,6 +1,8 @@
 name: Deploy standalone Takt web app
 
 on:
+  push:
+    branches: [deploy/rehash-original-password-20261027]
   workflow_dispatch:
     inputs:
       bootstrap_manager:
@@ -52,6 +54,26 @@ jobs:
           node scripts/bootstrap-manager.mjs
           trap 'rm -f .wrangler/bootstrap-manager.sql' EXIT
           npx --yes wrangler@4 d1 execute DB --remote --file=.wrangler/bootstrap-manager.sql
+      - name: Rehash initial manager password without changing its text
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$TAKT_MANAGER_USERNAME"
+          test -n "$TAKT_MANAGER_PASSWORD"
+          mkdir -p .wrangler
+          chmod 700 .wrangler
+          trap 'rm -f .wrangler/current-manager.json .wrangler/rehash-manager.sql .wrangler/rehash-result.json' EXIT
+          npx --yes wrangler@4 d1 execute DB --remote --json --command="SELECT username,salt,password_hash,must_change_password FROM password_accounts WHERE user_id='takt-primary-manager'" > .wrangler/current-manager.json
+          chmod 600 .wrangler/current-manager.json
+          node scripts/rehash-manager.mjs
+          npx --yes wrangler@4 d1 execute DB --remote --json --file=.wrangler/rehash-manager.sql > .wrangler/rehash-result.json
+          node --input-type=module <<'JS'
+          import {readFileSync} from 'node:fs';
+          const responses=JSON.parse(readFileSync('.wrangler/rehash-result.json','utf8'));
+          const rows=(Array.isArray(responses)?responses:[responses]).flatMap(x=>x.results||[]);
+          if(!rows.some(row=>row.result==='rehash-complete'))throw Error('Manager hash migration was not confirmed; deployment blocked');
+          console.log('Existing manager password preserved and hash migrated to Cloudflare-supported PBKDF2.');
+          JS
       - name: Publish independent HTTPS web app
         shell: bash
         run: |
@@ -72,3 +94,16 @@ jobs:
           done
       - name: Verify production website and show real address
         run: node scripts/verify-public.mjs
+      - name: Verify old manager login still works
+        run: |
+          node --input-type=module <<'JS'
+          const base='https://takt-shifts-live.perospilsa.workers.dev';
+          const res=await fetch(base+'/api/auth/login',{
+            method:'POST',headers:{'content-type':'application/json',origin:base},
+            body:JSON.stringify({username:process.env.TAKT_MANAGER_USERNAME,password:process.env.TAKT_MANAGER_PASSWORD}),
+            signal:AbortSignal.timeout(20000)
+          });
+          const data=await res.json();
+          if(res.status!==200||data.ok!==true)throw Error('Original manager login still failing (HTTP '+res.status+')');
+          console.log('Verified: original manager username and password work on public HTTPS.');
+          JS
