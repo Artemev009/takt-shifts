@@ -134,7 +134,7 @@ if(path==='/healthz'&&request.method==='GET'){
   try{
     await env.DB.prepare('SELECT must_change_password FROM password_accounts LIMIT 1').first();
     await env.DB.prepare('SELECT department FROM shifts LIMIT 1').first();
-    await env.DB.prepare('SELECT department FROM shift_offers LIMIT 1').first();
+    await env.DB.prepare('SELECT status FROM shift_offers LIMIT 1').first();
     await env.DB.prepare('SELECT department FROM department_needs LIMIT 1').first();
     const manager=await env.DB.prepare("SELECT m.user_id FROM members m JOIN password_accounts p ON p.user_id=m.user_id WHERE m.role='manager' AND m.enabled=1 LIMIT 1").first();
     return json({ready:!!manager},manager?200:503);
