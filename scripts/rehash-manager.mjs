@@ -13,9 +13,23 @@ const existing=rows[0];
 if(existing.username!==username||existing.must_change_password!==1)throw Error('Manager account was changed: cannot migrate automatically');
 if(!/^[0-9a-f]{32}$/i.test(existing.salt)||!/^[0-9a-f]{64}$/i.test(existing.password_hash))throw Error('Unexpected old password hash format');
 
-const originalDigest=pbkdf2Sync(password,Buffer.from(existing.salt,'utf8'),180000,32,'sha256');
 const savedDigest=Buffer.from(existing.password_hash,'hex');
-if(!timingSafeEqual(originalDigest,savedDigest))throw Error('Original GitHub Secret does not match the existing password: refusing rehash');
+const compatDigest=pbkdf2Sync(password,Buffer.from(existing.salt,'utf8'),100000,32,'sha256');
+const alreadyMigrated=timingSafeEqual(compatDigest,savedDigest);
+if(process.env.TAKT_VERIFY_MANAGER_ONLY==='1'){
+  if(!alreadyMigrated)throw Error('Manager password on Cloudflare was not migrated successfully');
+  console.log('Verified original manager password on Cloudflare-compatible hash.');
+  process.exit(0);
+}
+const originalDigest=pbkdf2Sync(password,Buffer.from(existing.salt,'utf8'),180000,32,'sha256');
+if(!alreadyMigrated&&!timingSafeEqual(originalDigest,savedDigest))throw Error('Original GitHub Secret does not match the existing password: refusing rehash');
+
+if(alreadyMigrated){
+  mkdirSync('.wrangler',{recursive:true,mode:0o700});
+  writeFileSync('.wrangler/rehash-manager.sql',"SELECT 'rehash-complete' AS result;\n",{mode:0o600});
+  console.log('Same original password already migrated; no account changes needed.');
+  process.exit(0);
+}
 
 const salt=randomBytes(16).toString('hex');
 const hash=pbkdf2Sync(password,Buffer.from(salt,'utf8'),100000,32,'sha256').toString('hex');
