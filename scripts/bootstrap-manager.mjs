@@ -9,7 +9,7 @@ if(password.length<12||password.length>128)throw Error('TAKT_MANAGER_PASSWORD mu
 if(name.length<2||name.length>80)throw Error('TAKT_MANAGER_NAME must be 2–80 characters');
 const quote=s=>"'"+s.replaceAll("'","''")+"'";
 const id='takt-primary-manager',salt=randomBytes(16).toString('hex');
-const digest=pbkdf2Sync(password,Buffer.from(salt,'utf8'),180000,32,'sha256').toString('hex');
+const digest=pbkdf2Sync(password,Buffer.from(salt,'utf8'),100000,32,'sha256').toString('hex');
 const now=new Date().toISOString();
 const sql=[
 '-- One-time initial password login; ON CONFLICT never resets an existing manager password.',
