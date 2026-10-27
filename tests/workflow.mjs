@@ -52,7 +52,7 @@ const DB = {
 };
 const source = readFileSync('dist/server/index.js');
 const { default: app } = await import('data:text/javascript;base64,' + source.toString('base64'));
-const env = { DB, MANAGER_EMAIL: 'manager@example.com' };
+const env = { DB, MANAGER_EMAIL: 'manager@example.com', TRUST_OAI_HEADERS: 'true' };
 const manager = 'manager@example.com', employee = 'employee@example.com', colleague = 'colleague@example.com';
 const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const tomorrow = new Date(Date.parse(today) + 86400000).toISOString().slice(0, 10);
