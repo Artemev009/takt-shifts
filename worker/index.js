@@ -88,6 +88,11 @@ async function upsertPassword(db,id,username,password){
   await db.prepare('DELETE FROM password_sessions WHERE user_id=?').bind(id).run();
   return true;
 }
+async function market(db,id,role){
+ const from=moscowToday(),to=addDays(from,14);
+ const rows=(await db.prepare("SELECT o.id,o.owner_id,o.work_date,o.volunteer_id,o.status,s.start,s.end,s.department,m.name AS owner_name,v.name AS volunteer_name FROM shift_offers o JOIN shifts s ON s.user_id=o.owner_id AND s.work_date=o.work_date JOIN members m ON m.user_id=o.owner_id LEFT JOIN members v ON v.user_id=o.volunteer_id WHERE o.work_date BETWEEN ? AND ? AND o.status IN ('open','claimed') ORDER BY o.work_date,s.start").bind(from,to).all()).results;
+ return {offers:rows.filter(x=>role==='manager'||x.status==='open'||x.owner_id===id||x.volunteer_id===id).map(x=>({id:x.id,ownerId:x.owner_id,date:x.work_date,volunteerId:x.volunteer_id,status:x.status,start:x.start,end:x.end,department:x.department,owner:x.owner_name,volunteer:role==='manager'||x.volunteer_id===id?x.volunteer_name:null}))};
+}
 async function deptCoverage(db,date){
   const previous=addDays(date,-1);
   const [planned,shifts]=await Promise.all([
@@ -124,7 +129,8 @@ if(!env.MANAGER_EMAIL&&!session)return fail('Руководитель не на�
 const date=request.method==='GET'?url.searchParams.get('date'):null;
 const email=(request.headers.get('oai-authenticated-user-email')||'').slice(0,200),rawName=request.headers.get('oai-authenticated-user-full-name')||'';
 let displayName=rawName;try{if(request.headers.get('oai-authenticated-user-full-name-encoding')==='percent-encoded-utf-8')displayName=decodeURIComponent(rawName)}catch{displayName=''}
-const m=session?session.member:await getMember(db,id,email,(displayName.trim()||email||'Сотрудник').slice(0,80),env.MANAGER_EMAIL);if(path==='/api/admin/users'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель',403);return json(await listUsers(db))}
+const m=session?session.member:await getMember(db,id,email,(displayName.trim()||email||'Сотрудник').slice(0,80),env.MANAGER_EMAIL);if(path==='/api/shift-market'&&request.method==='GET')return json(await market(db,id,m.role));
+if(path==='/api/admin/users'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель',403);return json(await listUsers(db))}
 if(path==='/api/department-coverage'&&request.method==='GET'){const day=url.searchParams.get('date');if(!validDate(day))return fail('Укажите дату');return json(await deptCoverage(db,day))}
 if(path==='/api/admin/users'&&request.method==='POST'){
   if(m.role!=='manager')return fail('Только руководитель',403);
@@ -195,6 +201,67 @@ if(a.type==='reviewCorrection'){
   await audit(db,id,c.user_id,'correction_reviewed',c.work_date,{kind:c.kind,decision:a.decision,time:c.proposed_at,short});
   await log(db,`Руководитель ${a.decision==='approve'?'подтвердил':'отклонил'} исправление отметки`);
   return json({ok:true});
+}
+if(a.type==='offerShift'){
+ if(workDate<today)return fail('Нельзя выставлять прошедшие смены');
+ const owner=a.userId&&m.role==='manager'?a.userId:id;
+ const shift=await db.prepare("SELECT start,end,department,in_at FROM shifts WHERE user_id=? AND work_date=? AND status='approved'").bind(owner,workDate).first();
+ if(!shift||shift.in_at)return fail('Можно выставлять только согласованную смену до начала работы',409);
+ if(workDate===today&&shift.start*60<=moscowMinute())return fail('Смена уже началась',409);
+ const now=moscowNowIso();
+ await db.prepare("INSERT INTO shift_offers(owner_id,work_date,status,volunteer_id,created_at,updated_at) VALUES(?,?,'open',NULL,?,?) ON CONFLICT(owner_id,work_date) DO UPDATE SET status='open',volunteer_id=NULL,updated_at=excluded.updated_at").bind(owner,workDate,now,now).run();
+ await notifyManagers(db,'Открыта смена на бирже: '+workDate+', '+shift.department);
+ await audit(db,id,owner,'shift_offered',workDate,{department:shift.department,start:shift.start,end:shift.end});
+ return json({ok:true});
+}
+if(a.type==='withdrawOffer'){
+ const offer=await db.prepare("SELECT owner_id FROM shift_offers WHERE id=? AND status IN ('open','claimed')").bind(a.offerId).first();
+ if(!offer)return fail('Предложение уже закрыто',409);
+ if(offer.owner_id!==id&&m.role!=='manager')return fail('Нельзя удалить чужое предложение',403);
+ await db.prepare("UPDATE shift_offers SET status='cancelled',updated_at=? WHERE id=?").bind(moscowNowIso(),a.offerId).run();
+ await audit(db,id,offer.owner_id,'shift_offer_cancelled',workDate);return json({ok:true});
+}
+if(a.type==='volunteerShift'){
+ const offer=await db.prepare("SELECT o.id,o.owner_id,o.work_date,o.status,s.start,s.end,s.department FROM shift_offers o JOIN shifts s ON s.user_id=o.owner_id AND s.work_date=o.work_date WHERE o.id=? AND o.status='open'").bind(a.offerId).first();
+ if(!offer||offer.work_date!==workDate)return fail('Смена уже недоступна',409);
+ if(offer.owner_id===id)return fail('Нельзя взять собственную смену',400);
+ if(offer.work_date===today&&offer.start*60<=moscowMinute())return fail('Смена уже начинается',409);
+ const person=await db.prepare('SELECT department,universal,enabled FROM members WHERE user_id=?').bind(id).first();
+ if(!person?.enabled||(offer.department!==person.department&&!person.universal)||(offer.department==='night'&&!person.universal))return fail('Нет допуска в отдел',403);
+ const assigned=await db.prepare("SELECT user_id FROM shifts WHERE user_id=? AND work_date=? AND status IN ('pending','approved')").bind(id,workDate).first();
+ if(assigned)return fail('На эту дату у вас уже есть смена или заявка',409);
+ const av=await db.prepare('SELECT status,start,end FROM availability WHERE user_id=? AND work_date=?').bind(id,workDate).first();
+ if(av&&(av.status==='unavailable'||av.start>offer.start||av.end<offer.end))return fail('Смена не совпадает с доступностью',409);
+ const up=await db.prepare("UPDATE shift_offers SET volunteer_id=?,status='claimed',updated_at=? WHERE id=? AND status='open'").bind(id,moscowNowIso(),a.offerId).run();
+ if(!up.meta.changes)return fail('Смену уже запросили',409);
+ await notifyManagers(db,'Поступил отклик на открытую смену '+workDate);
+ await audit(db,id,offer.owner_id,'shift_volunteer',workDate,{offerId:a.offerId});return json({ok:true});
+}
+if(a.type==='reviewShiftOffer'){
+ if(m.role!=='manager')return fail('Только руководитель подтверждает замену',403);
+ if(!['approve','reject'].includes(a.decision))return fail('Выберите решение');
+ const offer=await db.prepare("SELECT o.id,o.owner_id,o.work_date,o.volunteer_id,s.start,s.end,s.department,s.in_at FROM shift_offers o JOIN shifts s ON s.user_id=o.owner_id AND s.work_date=o.work_date WHERE o.id=? AND o.status='claimed'").bind(a.offerId).first();
+ if(!offer||offer.work_date!==workDate||!offer.volunteer_id||offer.in_at)return fail('Замена уже недоступна',409);
+ const candidate=await db.prepare('SELECT department,universal,enabled FROM members WHERE user_id=?').bind(offer.volunteer_id).first();
+ if(!candidate?.enabled||(offer.department!==candidate.department&&!candidate.universal)||(offer.department==='night'&&!candidate.universal))return fail('Доброволец больше не подходит по допуску',409);
+ const av=await db.prepare('SELECT status,start,end FROM availability WHERE user_id=? AND work_date=?').bind(offer.volunteer_id,workDate).first();
+ if(av&&(av.status==='unavailable'||av.start>offer.start||av.end<offer.end))return fail('Доброволец недоступен',409);
+ const busy=await db.prepare("SELECT user_id FROM shifts WHERE user_id=? AND work_date=? AND status IN ('pending','approved')").bind(offer.volunteer_id,workDate).first();
+ if(a.decision==='approve'&&busy)return fail('Доброволец уже занял другую смену',409);
+ if(a.decision==='reject'){
+   await db.prepare("UPDATE shift_offers SET volunteer_id=NULL,status='open',updated_at=? WHERE id=? AND status='claimed'").bind(moscowNowIso(),offer.id).run();
+   await notifyUser(db,offer.volunteer_id,'Запрос замены на '+workDate+' не согласован');
+ }else{
+   const changes=await db.batch([
+     db.prepare("UPDATE shifts SET user_id=? WHERE user_id=? AND work_date=? AND status='approved' AND in_at IS NULL").bind(offer.volunteer_id,offer.owner_id,workDate),
+     db.prepare("UPDATE shift_offers SET status='closed',updated_at=? WHERE id=? AND status='claimed'").bind(moscowNowIso(),offer.id)
+   ]);
+   if(!changes[0].meta.changes||!changes[1].meta.changes)return fail('Смена уже изменилась',409);
+   await notifyUser(db,offer.volunteer_id,'Вы получили смену '+workDate);
+   await notifyUser(db,offer.owner_id,'Ваша смена '+workDate+' передана другому сотруднику');
+ }
+ await audit(db,id,offer.volunteer_id,'shift_offer_reviewed',workDate,{offerId:offer.id,decision:a.decision});
+ return json({ok:true});
 }
 if(a.type==='setDepartmentNeed'){
   if(m.role!=='manager')return fail('Только руководитель может менять потребность',403);
