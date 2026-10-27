@@ -25,3 +25,5 @@ jobs:
         run: node tests/workflow.mjs
       - name: Check standalone deployment safety
         run: node tests/deployment.mjs
+      - name: Validate public deployment smoke script syntax
+        run: node --check scripts/verify-public.mjs
