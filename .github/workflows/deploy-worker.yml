@@ -1,8 +1,6 @@
 name: Deploy standalone Takt web app
 
 on:
-  push:
-    branches: [deploy/one-time-cloudflare-20261027]
   workflow_dispatch:
     inputs:
       bootstrap_manager:
