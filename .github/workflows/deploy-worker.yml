@@ -1,6 +1,8 @@
 name: Deploy standalone Takt web app
 
 on:
+  push:
+    branches: [deploy/login-crypto-20261027]
   workflow_dispatch:
     inputs:
       bootstrap_manager:
