@@ -127,6 +127,19 @@ if(path==='/sw.js')return new Response(serviceWorker,{headers:{...securityHeader
 if(path==='/icon.svg')return new Response(appIcon,{headers:{...securityHeaders,'content-type':'image/svg+xml; charset=utf-8','cache-control':'public, max-age=86400'}});
 if(path==='/icon-192.png')return pngResponse(icon192);
 if(path==='/icon-512.png')return pngResponse(icon512);
+// Readiness means the database migrations are present and an enabled manager can sign in with a password.
+// A 200 does not prove that the upstream hosting gateway allows access from employee devices.
+if(path==='/healthz'&&request.method==='GET'){
+  if(!env.DB)return json({ready:false},503);
+  try{
+    await env.DB.prepare('SELECT must_change_password FROM password_accounts LIMIT 1').first();
+    await env.DB.prepare('SELECT department FROM shifts LIMIT 1').first();
+    await env.DB.prepare('SELECT department FROM shift_offers LIMIT 1').first();
+    await env.DB.prepare('SELECT department FROM department_needs LIMIT 1').first();
+    const manager=await env.DB.prepare("SELECT m.user_id FROM members m JOIN password_accounts p ON p.user_id=m.user_id WHERE m.role='manager' AND m.enabled=1 LIMIT 1").first();
+    return json({ready:!!manager},manager?200:503);
+  }catch{return json({ready:false},503)}
+}
 if(!env.DB)return fail('Хранилище недоступно',503);
 const db=env.DB;
 if(request.method==='POST'&&(request.headers.get('origin')&&request.headers.get('origin')!==url.origin||request.headers.get('sec-fetch-site')==='cross-site'))return fail('Запрос из другого источника запрещён',403);
