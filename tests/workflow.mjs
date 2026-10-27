@@ -277,10 +277,10 @@ assert.doesNotMatch(managerUi, /Алина Морозова|Даниил Вол�
  matrix=await (await call(employee,'GET','/api/department-coverage?date='+tomorrow)).json();
  assert.equal(matrix.slots.find(x=>x.department==='alpha'&&x.hour===9).assigned,1);
  assert.equal((await sessionCall('GET','/api/admin/users')).status,403);
-  const night=addDays(tomorrow,1);
+  const night=new Date(Date.parse(tomorrow)+86400000).toISOString().slice(0,10);
  assert.equal((await sessionCall('POST','/api/action',{type:'book',date:night,start:22,end:30,department:'night'})).status,200);
  assert.equal((await action(manager,'approve',night,{userId:staffId})).status,200);
- let overnight=await (await call(manager,'GET','/api/department-coverage?date='+addDays(night,1))).json();
+ let overnight=await (await call(manager,'GET','/api/department-coverage?date='+new Date(Date.parse(night)+86400000).toISOString().slice(0,10))).json();
  assert.equal(overnight.slots.find(x=>x.department==='night'&&x.hour===2).assigned,1,'overnight hours count on the next calendar date');
 const disabled=await call(manager,'POST','/api/admin/staff',{userId:staffId,department:'alpha',universal:true,enabled:false});
  assert.equal(disabled.status,200);
