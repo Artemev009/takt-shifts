@@ -1,0 +1,39 @@
+name: Diagnose published Takt login endpoint
+on:
+  push:
+    branches: [diag/login-html-20261027]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Probe public Worker without credentials
+        run: |
+          node --input-type=module <<'JS'
+          const base='https://takt-shifts-live.perospilsa.workers.dev';
+          async function probe(name,path,init={}) {
+            try {
+              const r=await fetch(base+path,{redirect:'manual',signal:AbortSignal.timeout(18000),...init});
+              const text=await r.text();
+              const ct=r.headers.get('content-type')||'';
+              const result={name,status:r.status,contentType:ct,location:r.headers.get('location'),length:text.length,bodyStart:text.slice(0,450)};
+              console.log(JSON.stringify(result));
+              if(name.startsWith('login') && (!ct.includes('application/json')||r.status!==401))process.exitCode=1;
+            } catch(e) {
+              console.log(JSON.stringify({name,error:String(e),cause:e.cause?.code}));
+              process.exitCode=1;
+            }
+          }
+          await probe('health','/healthz');
+          for(const [i,headers] of [
+            ['direct',{'content-type':'application/json'}],
+            ['browser',{'content-type':'application/json','origin':base,'sec-fetch-site':'same-origin','accept':'*/*'}],
+          ]) {
+            await probe('login-'+i,'/api/auth/login',{method:'POST',headers,body:JSON.stringify({username:'probe.not.real.'+i,password:'not-a-real-password'})});
+          }
+          JS
