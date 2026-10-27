@@ -19,6 +19,24 @@ assert.match(html, /brand-logo/, 'redesigned shell is present');
 assert.match(clientScript, /api\/schedule/, 'live schedule is loaded');
 assert.doesNotMatch(clientScript, /login-manager|roleSwitch|_demo_/, 'demo role switching is absent');
 
+// Upgrade the exact pre-pilot schema with retained rows before running the full clean-database workflow.
+const upgradeDb = new DatabaseSync(':memory:');
+for (const file of readdirSync('drizzle').filter(x => /^000[0-6]_.*\.sql$/.test(x)).sort()) {
+  for (const statement of readFileSync('drizzle/' + file, 'utf8').split('--> statement-breakpoint')) if (statement.trim()) upgradeDb.exec(statement);
+}
+upgradeDb.prepare("INSERT INTO members(user_id,name,role) VALUES('existing','Существующий сотрудник','employee')").run();
+upgradeDb.prepare("INSERT INTO shifts(user_id,work_date,start,end,status) VALUES('existing','2026-10-22',10,16,'approved')").run();
+for (const file of readdirSync('drizzle').filter(x => /^000[7-9]_.*\.sql$/.test(x)).sort()) {
+  for (const statement of readFileSync('drizzle/' + file, 'utf8').split('--> statement-breakpoint')) if (statement.trim()) upgradeDb.exec(statement);
+}
+const upgradedMember = upgradeDb.prepare("SELECT department,universal,enabled FROM members WHERE user_id='existing'").get();
+assert.equal(upgradedMember.department, 'mix');
+assert.equal(upgradedMember.universal, 0);
+assert.equal(upgradedMember.enabled, 1);
+assert.equal(upgradeDb.prepare("SELECT department FROM shifts WHERE user_id='existing'").get().department, 'mix');
+assert.ok(upgradeDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='password_accounts'").get(), 'password tables exist after upgrade');
+upgradeDb.close();
+
 const db = new DatabaseSync(':memory:');
 for (const file of readdirSync('drizzle').filter(x => x.endsWith('.sql')).sort()) {
   for (const statement of readFileSync('drizzle/' + file, 'utf8').split('--> statement-breakpoint')) {
@@ -69,6 +87,12 @@ const view = async (email, date = today) => (await call(email, 'GET', '/api/stat
 const action = (email, type, date = today, details = {}) => call(email, 'POST', '/api/action', { type, date, ...details });
 const login = await app.fetch(new Request('https://example.test/'), env);
 assert.match(await login.text(), /Войти в личный кабинет/);
+assert.match(login.headers.get('content-security-policy'), /frame-ancestors 'none'/, 'HTML has security headers');
+const manifestResponse = await app.fetch(new Request('https://example.test/manifest.webmanifest'), env);
+const manifest = await manifestResponse.json();
+assert.equal(manifest.display, 'standalone', 'PWA opens without browser chrome');
+assert.equal(manifest.start_url, '/');
+assert.match(await (await app.fetch(new Request('https://example.test/sw.js'), env)).text(), /clients\.claim/, 'service worker is served');
 assert.match(await (await call(employee, 'GET', '/')).text(), /Личный кабинет/);
 assert.equal((await app.fetch(new Request('https://example.test/api/state?date=' + today), env)).status, 401);
 
@@ -235,6 +259,7 @@ const managerUi = await renderClient(manager);
 const employeeUi = await renderClient(employee);
 const managerRequestsUi = await renderClient(manager, 'requests');
 const employeeRequestsUi = await renderClient(employee, 'requests');
+const employeeProfileUi = await renderClient(employee, 'profile');
 assert.match(managerUi, /Сотрудники и заявки/);
 assert.match(managerUi, /Настроить потребность/);
 assert.match(managerUi, /Требует внимания/);
@@ -243,6 +268,7 @@ assert.match(managerRequestsUi, /Доступность команды/);
 assert.match(managerRequestsUi, /Исправления отметок/);
 assert.match(employeeRequestsUi, /Моя доступность/);
 assert.match(employeeRequestsUi, /Пропущенная отметка/);
+assert.match(employeeProfileUi, /Установить приложение/);
 assert.doesNotMatch(employeeUi, /Сотрудники и заявки/);
 assert.doesNotMatch(managerUi, /Алина Морозова|Даниил Волков/, 'prototype fixtures are absent');
 
@@ -271,6 +297,10 @@ assert.doesNotMatch(managerUi, /Алина Морозова|Даниил Вол�
  async function sessionCall(method,path,body){
    return app.fetch(new Request('https://example.test'+path,{method,headers:{cookie,...(body?{'content-type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})}),env)
  }
+ assert.equal((await sessionCall('GET','/api/state?date='+tomorrow)).status,428,'temporary password must be changed before using the app');
+ assert.match(await (await app.fetch(new Request('https://example.test/',{headers:{cookie}}),env)).text(),/Задайте личный пароль/);
+ const changedPassword=await sessionCall('POST','/api/auth/change-password',{currentPassword:'SecurePilot2026!',newPassword:'FreshPilot2026!'});
+ assert.equal(changedPassword.status,200);
  assert.equal((await (await sessionCall('GET','/api/state?date='+tomorrow)).json()).role,'employee');
  assert.equal((await sessionCall('POST','/api/action',{type:'book',date:tomorrow,start:9,end:15,department:'alpha'})).status,200);
  assert.equal((await action(manager,'approve',tomorrow,{userId:staffId})).status,200);
