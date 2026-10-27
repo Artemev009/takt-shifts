@@ -32,7 +32,133 @@ async function attention(db,today){
   ]);
   return {pending:pending.results.map(x=>({userId:x.user_id,date:x.work_date,start:x.start,end:x.end,name:x.name})),open:open.results.map(x=>({date:x.work_date,name:x.name})),corrections:correction.results.map(x=>({id:x.id,date:x.work_date,kind:x.kind,time:x.proposed_at,reason:x.reason,name:x.name})),short:short.results.map(x=>({userId:x.user_id,date:x.work_date,in:x.in_at,out:x.out_at,reason:x.short_reason,name:x.name}))};
 }
-export default {async fetch(request,env){const url=new URL(request.url),path=url.pathname;if(path==='/')return new Response(request.headers.get('oai-authenticated-user-id')?page:loginPage,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});if(!path.startsWith('/api/'))return new Response('Not found',{status:404});const id=request.headers.get('oai-authenticated-user-id');if(!id)return fail('Требуется вход',401);if(!env.DB)return fail('Хранилище недоступно',503);if(!env.MANAGER_EMAIL)return fail('Руководитель не настроен',503);const date=request.method==='GET'?url.searchParams.get('date'):null;const db=env.DB,email=(request.headers.get('oai-authenticated-user-email')||'').slice(0,200),rawName=request.headers.get('oai-authenticated-user-full-name')||'';let displayName=rawName;try{if(request.headers.get('oai-authenticated-user-full-name-encoding')==='percent-encoded-utf-8')displayName=decodeURIComponent(rawName)}catch{displayName=''}const m=await getMember(db,id,email,(displayName.trim()||email||'Сотрудник').slice(0,80),env.MANAGER_EMAIL);if(path==='/api/schedule'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель может видеть график команды',403);const start=url.searchParams.get('start');if(!validDate(start))return fail('Укажите дату начала');return json(await schedule(db,start))}if(path==='/api/history'&&request.method==='GET'){const start=url.searchParams.get('start');if(!validDate(start))return fail('Укажите дату начала');return json(await history(db,start,id,m.role))}if(path==='/api/week'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель может видеть обзор',403);const start=url.searchParams.get('start');if(!validDate(start))return fail('Укажите дату начала');return json(await week(db,start))}if(path==='/api/state'&&request.method==='GET'){if(!validDate(date))return fail('Укажите дату');return json(await extendedState(db,id,m,date))}if(path==='/api/corrections'&&request.method==='GET')return json(await corrections(db,id,m.role));if(path==='/api/notifications'&&request.method==='GET')return json(await notifications(db,id));if(path==='/api/audit'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель',403);return json(await auditTrail(db))}if(path==='/api/attention'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель',403);return json(await attention(db,moscowToday()))}if(path!=='/api/action'||request.method!=='POST')return fail('Не найдено',404);let a;try{a=await request.json()}catch{return fail('Неверный JSON')}if(!a||typeof a.type!=='string'||!validDate(a.date))return fail('Неверное действие или дата');const workDate=a.date,today=moscowToday();
+
+const DEPARTMENT_CODES=['alpha','mix','mail','mess','night'];
+const moscowNowIso=()=>new Date().toISOString();
+const pwText=new TextEncoder();
+const secretHex=bytes=>Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+function randomHex(size=32){const bytes=new Uint8Array(size);crypto.getRandomValues(bytes);return secretHex(bytes)}
+async function hashSession(token){return secretHex(new Uint8Array(await crypto.subtle.digest('SHA-256',pwText.encode(token))))}
+async function hashPassword(password,salt){
+  const key=await crypto.subtle.importKey('raw',pwText.encode(password),'PBKDF2',false,['deriveBits']);
+  const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt:pwText.encode(salt),iterations:180000,hash:'SHA-256'},key,256);
+  return secretHex(new Uint8Array(bits));
+}
+const validLogin=v=>typeof v==='string'&&/^[a-z0-9._-]{3,32}$/.test(v);
+const validPassword=v=>typeof v==='string'&&v.length>=12&&v.length<=128;
+const sessionCookie='__Host-takt_session';
+function getSessionToken(request){const cookie=request.headers.get('cookie')||'';const hit=cookie.split(';').map(x=>x.trim()).find(x=>x.startsWith(sessionCookie+'='));return hit?hit.slice(sessionCookie.length+1):null}
+const cookieValue=(token,maxAge)=>sessionCookie+'='+token+'; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age='+maxAge;
+async function loggedInSession(db,request){
+  const token=getSessionToken(request);
+  if(!token||!/^[a-f0-9]{64}$/.test(token))return null;
+  const digest=await hashSession(token);
+  const row=await db.prepare('SELECT s.user_id,m.name,m.role,m.department,m.universal,m.enabled,s.expires_at FROM password_sessions s JOIN members m ON m.user_id=s.user_id WHERE s.token_hash=?').bind(digest).first();
+  if(!row||!row.enabled||row.expires_at<moscowNowIso())return null;
+  return {id:row.user_id,member:{role:row.role,name:row.name,email:'',department:row.department,universal:!!row.universal},tokenHash:digest};
+}
+async function loginByPassword(db,request){
+  let body;try{body=await request.json()}catch{return fail('Некорректные данные входа')}
+  const username=String(body.username||'').trim().toLowerCase(),password=body.password;
+  if(!validLogin(username)||typeof password!=='string'||password.length>128)return fail('Неверный логин или пароль',401);
+  const now=moscowNowIso(),failure=await db.prepare('SELECT attempts,blocked_until FROM password_failures WHERE username=?').bind(username).first();
+  if(failure?.blocked_until&&failure.blocked_until>now)return fail('Слишком много попыток. Повторите через 15 минут',429);
+  const account=await db.prepare('SELECT a.user_id,a.salt,a.password_hash,m.enabled FROM password_accounts a JOIN members m ON m.user_id=a.user_id WHERE a.username=?').bind(username).first();
+  const computed=await hashPassword(password,account?.salt||'not-an-existing-account');
+  if(!account||!account.enabled||computed!==account.password_hash){
+    const count=(failure?.attempts||0)+1,blocked=count>=5?new Date(Date.now()+15*60000).toISOString():null;
+    await db.prepare('INSERT INTO password_failures(username,attempts,blocked_until) VALUES(?,?,?) ON CONFLICT(username) DO UPDATE SET attempts=excluded.attempts,blocked_until=excluded.blocked_until').bind(username,count>=5?0:count,blocked).run();
+    return fail('Неверный логин или пароль',401);
+  }
+  await db.prepare('DELETE FROM password_failures WHERE username=?').bind(username).run();
+  const token=randomHex(),digest=await hashSession(token);
+  await db.prepare('INSERT INTO password_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(digest,account.user_id,new Date(Date.now()+24*3600000).toISOString(),now).run();
+  return new Response(JSON.stringify({ok:true}),{status:200,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store','set-cookie':cookieValue(token,86400)}});
+}
+async function listUsers(db){
+  const rows=(await db.prepare("SELECT m.user_id,m.name,m.role,m.department,m.universal,m.enabled,a.username FROM members m LEFT JOIN password_accounts a ON a.user_id=m.user_id ORDER BY m.name").all()).results;
+  return {users:rows.map(x=>({id:x.user_id,name:x.name,role:x.role,department:x.department,universal:!!x.universal,enabled:!!x.enabled,username:x.username||null}))};
+}
+async function upsertPassword(db,id,username,password){
+  if(!validLogin(username)||!validPassword(password))return false;
+  const conflict=await db.prepare('SELECT user_id FROM password_accounts WHERE username=?').bind(username).first();
+  if(conflict&&conflict.user_id!==id)return false;
+  const salt=randomHex(16),digest=await hashPassword(password,salt),now=moscowNowIso();
+  await db.prepare('INSERT INTO password_accounts(username,user_id,salt,password_hash,created_at,changed_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,salt=excluded.salt,password_hash=excluded.password_hash,changed_at=excluded.changed_at').bind(username,id,salt,digest,now,now).run();
+  await db.prepare('DELETE FROM password_sessions WHERE user_id=?').bind(id).run();
+  return true;
+}
+async function deptCoverage(db,date){
+  const previous=addDays(date,-1);
+  const [planned,shifts]=await Promise.all([
+    db.prepare('SELECT department,hour,count FROM department_needs WHERE work_date=?').bind(date).all(),
+    db.prepare("SELECT department,work_date,start,end FROM shifts WHERE work_date IN (?,?) AND status='approved'").bind(previous,date).all()
+  ]);
+  const plan=new Map(planned.results.map(x=>[x.department+'|'+x.hour,x.count]));
+  const slots=[];
+  for(const department of DEPARTMENT_CODES)for(let hour=0;hour<24;hour++){
+    if(department==='night'&&hour>=8&&hour<22)continue;
+    if(department!=='night'&&(hour<8||hour>=22))continue;
+    const assigned=shifts.results.filter(s=>s.department===department&&(s.work_date===date?s.start<=hour&&s.end>hour:s.end>hour+24)).length;
+    const required=plan.get(department+'|'+hour);
+    slots.push({department,hour,required:required===undefined?null:required,assigned,shortage:required===undefined?null:Math.max(0,required-assigned)});
+  }
+  return {date,slots};
+}
+
+export default {async fetch(request,env){const url=new URL(request.url),path=url.pathname;if(!env.DB)return fail('Хранилище недоступно',503);
+const db=env.DB;
+if(request.method==='POST'&&request.headers.get('origin')&&request.headers.get('origin')!==url.origin)return fail('Запрос из другого источника запрещён',403);
+if(path==='/api/auth/login'&&request.method==='POST')return loginByPassword(db,request);
+const session=await loggedInSession(db,request);
+if(path==='/api/auth/logout'&&request.method==='POST'){
+  if(session)await db.prepare('DELETE FROM password_sessions WHERE token_hash=?').bind(session.tokenHash).run();
+  return new Response(JSON.stringify({ok:true}),{headers:{'content-type':'application/json','set-cookie':cookieValue('',0),'cache-control':'no-store'}});
+}
+if(path==='/')return new Response(session||request.headers.get('oai-authenticated-user-id')?page:loginPage,{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}});
+if(!path.startsWith('/api/'))return new Response('Not found',{status:404});
+const id=session?.id||request.headers.get('oai-authenticated-user-id');
+if(!id)return fail('Требуется вход',401);
+if(!env.MANAGER_EMAIL&&!session)return fail('Руководитель не настроен',503);
+const date=request.method==='GET'?url.searchParams.get('date'):null;
+const email=(request.headers.get('oai-authenticated-user-email')||'').slice(0,200),rawName=request.headers.get('oai-authenticated-user-full-name')||'';
+let displayName=rawName;try{if(request.headers.get('oai-authenticated-user-full-name-encoding')==='percent-encoded-utf-8')displayName=decodeURIComponent(rawName)}catch{displayName=''}
+const m=session?session.member:await getMember(db,id,email,(displayName.trim()||email||'Сотрудник').slice(0,80),env.MANAGER_EMAIL);if(path==='/api/admin/users'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель',403);return json(await listUsers(db))}
+if(path==='/api/department-coverage'&&request.method==='GET'){const day=url.searchParams.get('date');if(!validDate(day))return fail('Укажите дату');return json(await deptCoverage(db,day))}
+if(path==='/api/admin/users'&&request.method==='POST'){
+  if(m.role!=='manager')return fail('Только руководитель',403);
+  let a;try{a=await request.json()}catch{return fail('Неверные данные')}
+  const username=String(a.username||'').toLowerCase().trim(),name=String(a.name||'').trim(),department=a.department,universal=a.universal===true;
+  if(!validLogin(username)||!validPassword(a.password)||name.length<2||name.length>80||!DEPARTMENT_CODES.slice(0,4).includes(department))return fail('Введите имя, отдел, логин и пароль от 12 символов');
+  const duplicate=await db.prepare('SELECT username FROM password_accounts WHERE username=?').bind(username).first();if(duplicate)return fail('Этот логин занят',409);
+  const idNew='staff-'+randomHex(12);
+  await db.prepare("INSERT INTO members(user_id,name,role,department,universal,enabled) VALUES(?,?,'employee',?,?,1)").bind(idNew,name,department,universal?1:0).run();
+  if(!await upsertPassword(db,idNew,username,a.password))return fail('Не удалось создать пароль',409);
+  await audit(db,id,idNew,'staff_created',null,{department,universal});
+  return json({ok:true,id:idNew});
+}
+if(path==='/api/admin/password'&&request.method==='POST'){
+  if(m.role!=='manager')return fail('Только руководитель',403);
+  let a;try{a=await request.json()}catch{return fail('Неверные данные')}
+  const userId=typeof a.userId==='string'?a.userId:id;
+  const target=await db.prepare('SELECT user_id,role FROM members WHERE user_id=?').bind(userId).first();
+  if(!target||target.role==='manager'&&target.user_id!==id)return fail('Нельзя изменить чужой аккаунт руководителя',403);
+  if(!await upsertPassword(db,userId,String(a.username||'').trim().toLowerCase(),a.password))return fail('Логин занят или ненадёжный пароль');
+  await audit(db,id,userId,'password_changed',null);
+  return json({ok:true});
+}
+if(path==='/api/admin/staff'&&request.method==='POST'){
+  if(m.role!=='manager')return fail('Только руководитель',403);
+  let a;try{a=await request.json()}catch{return fail('Неверные данные')}
+  if(typeof a.userId!=='string'||!DEPARTMENT_CODES.slice(0,4).includes(a.department)||typeof a.universal!=='boolean'||typeof a.enabled!=='boolean')return fail('Некорректные настройки сотрудника');
+  const target=await db.prepare("SELECT role FROM members WHERE user_id=?").bind(a.userId).first();
+  if(!target||target.role!=='employee')return fail('Изменять можно только сотрудников',403);
+  await db.prepare('UPDATE members SET department=?,universal=?,enabled=? WHERE user_id=?').bind(a.department,a.universal?1:0,a.enabled?1:0,a.userId).run();
+  if(!a.enabled)await db.prepare('DELETE FROM password_sessions WHERE user_id=?').bind(a.userId).run();
+  await audit(db,id,a.userId,'staff_updated',null,{department:a.department,universal:a.universal,enabled:a.enabled});
+  return json({ok:true});
+}
+if(path==='/api/schedule'&&request.method==='GET'){const start=url.searchParams.get('start');if(!validDate(start))return fail('Укажите дату начала');const r=await schedule(db,start);return json(m.role==='manager'?r:{dates:r.dates,people:r.people.map(p=>({name:p.name,days:Object.fromEntries(Object.entries(p.days).filter(([date,x])=>x.status==='approved'||p.name===m.name))})).filter(p=>Object.keys(p.days).length)})}if(path==='/api/history'&&request.method==='GET'){const start=url.searchParams.get('start');if(!validDate(start))return fail('Укажите дату начала');return json(await history(db,start,id,m.role))}if(path==='/api/week'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель может видеть обзор',403);const start=url.searchParams.get('start');if(!validDate(start))return fail('Укажите дату начала');return json(await week(db,start))}if(path==='/api/state'&&request.method==='GET'){if(!validDate(date))return fail('Укажите дату');return json(await extendedState(db,id,m,date))}if(path==='/api/corrections'&&request.method==='GET')return json(await corrections(db,id,m.role));if(path==='/api/notifications'&&request.method==='GET')return json(await notifications(db,id));if(path==='/api/audit'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель',403);return json(await auditTrail(db))}if(path==='/api/attention'&&request.method==='GET'){if(m.role!=='manager')return fail('Только руководитель',403);return json(await attention(db,moscowToday()))}if(path!=='/api/action'||request.method!=='POST')return fail('Не найдено',404);let a;try{a=await request.json()}catch{return fail('Неверный JSON')}if(!a||typeof a.type!=='string'||!validDate(a.date))return fail('Неверное действие или дата');const workDate=a.date,today=moscowToday();
 if(a.type==='rotateAttendanceCode'){if(m.role!=='manager')return fail('Только руководитель может обновить код точки',403);if(workDate!==today)return fail('Код выдаётся только на сегодня');const digits=new Uint32Array(1),saltBytes=new Uint8Array(16);crypto.getRandomValues(digits);crypto.getRandomValues(saltBytes);const code=String(digits[0]%1000000).padStart(6,'0'),salt=hex(saltBytes),expiresAt=new Date(Date.now()+4*3600000).toISOString();await db.prepare('INSERT INTO attendance_codes(work_date,code_hash,expires_at,created_by,created_at) VALUES(?,?,?,?,?) ON CONFLICT(work_date) DO UPDATE SET code_hash=excluded.code_hash,expires_at=excluded.expires_at,created_by=excluded.created_by,created_at=excluded.created_at').bind(workDate,`${salt}:${await hashCode(salt,code)}`,expiresAt,id,new Date().toISOString()).run();await audit(db,id,null,'code_rotated',workDate,{expiresAt});return json({ok:true,code,expiresAt})}
 if(a.type==='markNotificationsRead'){await db.prepare('UPDATE notifications SET read_at=? WHERE user_id=? AND read_at IS NULL').bind(new Date().toISOString(),id).run();return json({ok:true})}
 if(a.type==='reviewShortShift'){if(m.role!=='manager')return fail('Только руководитель может рассмотреть короткую смену',403);if(typeof a.userId!=='string'||!['accepted','disputed'].includes(a.decision))return fail('Неверное решение');const note=typeof a.note==='string'?a.note.trim():'';if(a.decision==='disputed'&&(note.length<3||note.length>200))return fail('Укажите причину несогласия');const s=await db.prepare('SELECT in_at,out_at,short_review_status FROM shifts WHERE user_id=? AND work_date=?').bind(a.userId,workDate).first();if(!s?.in_at||!s.out_at||new Date(s.out_at)-new Date(s.in_at)>=5*3600000||s.short_review_status)return fail('Короткая смена уже обработана или не найдена',409);const r=await db.prepare('UPDATE shifts SET short_review_status=?,short_review_by=?,short_review_at=?,short_review_note=? WHERE user_id=? AND work_date=? AND short_review_status IS NULL AND out_at IS NOT NULL').bind(a.decision,id,new Date().toISOString(),note||null,a.userId,workDate).run();if(!r.meta.changes)return fail('Смена уже обработана',409);await notifyUser(db,a.userId,a.decision==='accepted'?`Короткая смена ${workDate} согласована руководителем`:`Короткая смена ${workDate} оспорена: ${note}`);await audit(db,id,a.userId,'short_shift_reviewed',workDate,{decision:a.decision,note});return json({ok:true})}
@@ -69,11 +195,19 @@ if(a.type==='reviewCorrection'){
   await log(db,`Руководитель ${a.decision==='approve'?'подтвердил':'отклонил'} исправление отметки`);
   return json({ok:true});
 }
+if(a.type==='setDepartmentNeed'){
+  if(m.role!=='manager')return fail('Только руководитель может менять потребность',403);
+  if(!DEPARTMENT_CODES.includes(a.department)||!Number.isInteger(a.hour)||a.hour<0||a.hour>23||!Number.isInteger(a.count)||a.count<0||a.count>50)return fail('Некорректная потребность');
+  if(a.department==='night'&&a.hour>=8&&a.hour<22||a.department!=='night'&&(a.hour<8||a.hour>=22))return fail('Час не соответствует режиму отдела');
+  await db.prepare('INSERT INTO department_needs(work_date,hour,department,count) VALUES(?,?,?,?) ON CONFLICT(work_date,hour,department) DO UPDATE SET count=excluded.count').bind(workDate,a.hour,a.department,a.count).run();
+  await audit(db,id,null,'department_need_changed',workDate,{department:a.department,hour:a.hour,count:a.count});
+  return json({ok:true});
+}
 if(a.type==='setNeed'){if(m.role!=='manager')return fail('Только руководитель может менять потребность',403);if(!Number.isInteger(a.hour)||a.hour<8||a.hour>19||!Number.isInteger(a.count)||a.count<0||a.count>30)return fail('Неверное значение');await db.prepare('INSERT INTO needs(work_date,hour,count) VALUES(?,?,?) ON CONFLICT(work_date,hour) DO UPDATE SET count=excluded.count').bind(workDate,a.hour,a.count).run();await log(db,`Потребность на ${a.hour}:00: ${a.count} чел.`);await audit(db,id,null,'need_changed',workDate,{hour:a.hour,count:a.count});return json({ok:true})}
 if(a.type==='setNeedRange'){if(m.role!=='manager')return fail('Только руководитель может менять потребность',403);if(!Number.isInteger(a.start)||!Number.isInteger(a.end)||a.start<8||a.end>20||a.end<=a.start||!Number.isInteger(a.count)||a.count<0||a.count>30)return fail('Укажите корректный интервал и число сотрудников');const stmt=db.prepare('INSERT INTO needs(work_date,hour,count) VALUES(?,?,?) ON CONFLICT(work_date,hour) DO UPDATE SET count=excluded.count');await db.batch(Array.from({length:a.end-a.start},(_,i)=>stmt.bind(workDate,a.start+i,a.count)));await log(db,`Потребность ${workDate}, ${a.start}:00–${a.end}:00: ${a.count} чел.`);await audit(db,id,null,'need_changed',workDate,{start:a.start,end:a.end,count:a.count});return json({ok:true})}
 if(a.type==='copyNeeds'){if(m.role!=='manager')return fail('Только руководитель может менять потребность',403);if(!validDate(a.sourceDate)||a.sourceDate===workDate)return fail('Выберите другую исходную дату');const source=await state(db,id,m,a.sourceDate);const stmt=db.prepare('INSERT INTO needs(work_date,hour,count) VALUES(?,?,?) ON CONFLICT(work_date,hour) DO UPDATE SET count=excluded.count');await db.batch(source.state.need.map((count,i)=>stmt.bind(workDate,i+8,count)));await log(db,`Потребность скопирована с ${a.sourceDate} на ${workDate}`);await audit(db,id,null,'need_changed',workDate,{sourceDate:a.sourceDate});return json({ok:true})}
-if(a.type==='book'){if(workDate<today)return fail('Нельзя отправить заявку на прошедший день');if(!Number.isInteger(a.start)||!Number.isInteger(a.end)||a.start<8||a.end>20||a.end-a.start<5)return fail('Выберите не менее 5 часов в интервале 08:00–20:00');if(workDate===today&&a.start*60<=moscowMinute())return fail('Начало интервала уже прошло. Выберите ближайший будущий час',409);const av=await db.prepare('SELECT status,start,end FROM availability WHERE user_id=? AND work_date=?').bind(id,workDate).first();if(av&&(av.status==='unavailable'||av.start>a.start||av.end<a.end))return fail('Выбранное время не совпадает с вашей доступностью',409);const s=await db.prepare('SELECT in_at FROM shifts WHERE user_id=? AND work_date=?').bind(id,workDate).first();if(s?.in_at)return fail('Сначала завершите текущую смену',409);await db.prepare("INSERT INTO shifts(user_id,work_date,start,end,in_at,out_at,status) VALUES(?,?,?,?,NULL,NULL,'pending') ON CONFLICT(user_id,work_date) DO UPDATE SET start=excluded.start,end=excluded.end,in_at=NULL,out_at=NULL,status='pending',rejection_reason=NULL,short_reason=NULL WHERE shifts.in_at IS NULL").bind(id,workDate,a.start,a.end).run();await log(db,`${m.name} выбрал интервал ${a.start}:00–${a.end}:00`);await notifyManagers(db,`${m.name} отправил заявку на ${workDate}, ${a.start}:00–${a.end}:00`);await audit(db,id,id,'shift_requested',workDate,{start:a.start,end:a.end});return json({ok:true})}
-if(a.type==='approve'){if(m.role!=='manager')return fail('Только руководитель может согласовать заявку',403);const av=await db.prepare('SELECT a.status,a.start,a.end,s.start AS shift_start,s.end AS shift_end FROM availability a JOIN shifts s ON s.user_id=a.user_id AND s.work_date=a.work_date WHERE a.user_id=? AND a.work_date=?').bind(a.userId,workDate).first();if(av&&(av.status==='unavailable'||av.start>av.shift_start||av.end<av.shift_end))return fail('Сотрудник отметил недоступность для этой смены',409)}
+if(a.type==='book'){if(workDate<today)return fail('Нельзя отправить заявку на прошедший день');const department=a.department||m.department||'mix';if(!DEPARTMENT_CODES.includes(department))return fail('Выберите отдел');if(department!==m.department&&!m.universal)return fail('У вас нет допуска к этому отделу',403);if(department==='night'&&!m.universal)return fail('Для ночной смены требуется универсальный допуск',403);const validHours=Number.isInteger(a.start)&&Number.isInteger(a.end)&&a.end-a.start>=5&&a.end-a.start<=12&&(department==='night'?a.start>=20&&a.start<=23&&a.end>=24&&a.end<=34:a.start>=8&&a.end<=22);if(!validHours)return fail('Неверный интервал или длительность смены');if(workDate===today&&a.start*60<=moscowMinute())return fail('Начало интервала уже прошло. Выберите ближайший будущий час',409);const av=await db.prepare('SELECT status,start,end FROM availability WHERE user_id=? AND work_date=?').bind(id,workDate).first();if(av&&(av.status==='unavailable'||av.start>a.start||av.end<a.end))return fail('Выбранное время не совпадает с вашей доступностью',409);const s=await db.prepare('SELECT in_at FROM shifts WHERE user_id=? AND work_date=?').bind(id,workDate).first();if(s?.in_at)return fail('Сначала завершите текущую смену',409);await db.prepare("INSERT INTO shifts(user_id,work_date,start,end,in_at,out_at,status,department) VALUES(?,?,?,?,NULL,NULL,'pending',?) ON CONFLICT(user_id,work_date) DO UPDATE SET start=excluded.start,end=excluded.end,department=excluded.department,in_at=NULL,out_at=NULL,status='pending',rejection_reason=NULL,short_reason=NULL WHERE shifts.in_at IS NULL").bind(id,workDate,a.start,a.end,department).run();await log(db,`${m.name} выбрал интервал ${a.start}:00–${a.end}:00`);await notifyManagers(db,`${m.name} отправил заявку на ${workDate}, ${a.start}:00–${a.end}:00`);await audit(db,id,id,'shift_requested',workDate,{start:a.start,end:a.end});return json({ok:true})}
+if(a.type==='approve'){if(m.role!=='manager')return fail('Только руководитель может согласовать заявку',403);const permission=await db.prepare('SELECT s.department,m.department AS main_department,m.universal,m.enabled FROM shifts s JOIN members m ON m.user_id=s.user_id WHERE s.user_id=? AND s.work_date=?').bind(a.userId,workDate).first();if(!permission||!permission.enabled||(permission.department!==permission.main_department&&!permission.universal)||(permission.department==='night'&&!permission.universal))return fail('У сотрудника нет допуска или доступ отключён',409);const av=await db.prepare('SELECT a.status,a.start,a.end,s.start AS shift_start,s.end AS shift_end FROM availability a JOIN shifts s ON s.user_id=a.user_id AND s.work_date=a.work_date WHERE a.user_id=? AND a.work_date=?').bind(a.userId,workDate).first();if(av&&(av.status==='unavailable'||av.start>av.shift_start||av.end<av.shift_end))return fail('Сотрудник отметил недоступность для этой смены',409)}
 if(a.type==='approve'||a.type==='reject'){if(m.role!=='manager')return fail('Только руководитель может согласовать заявку',403);if(workDate<today)return fail('Нельзя согласовать прошедшую смену',409);if(typeof a.userId!=='string'||a.userId.length>200)return fail('Неверный сотрудник');if(a.type==='approve'&&workDate===today){const candidate=await db.prepare('SELECT start FROM shifts WHERE user_id=? AND work_date=?').bind(a.userId,workDate).first();if(candidate&&candidate.start*60<=moscowMinute())return fail('Начало смены уже прошло. Попросите сотрудника выбрать новое время',409)}const next=a.type==='approve'?'approved':'rejected',reason=typeof a.reason==='string'?a.reason.trim():'';if(next==='rejected'&&(reason.length<3||reason.length>200))return fail('Укажите причину отклонения: от 3 до 200 символов');const result=await db.prepare("UPDATE shifts SET status=?,rejection_reason=? WHERE user_id=? AND work_date=? AND status='pending' AND in_at IS NULL").bind(next,next==='rejected'?reason:null,a.userId,workDate).run();if(!result.meta.changes)return fail('Заявка уже обработана',409);await log(db,next==='approved'?'Руководитель подтвердил заявку':'Руководитель отклонил заявку');await notifyUser(db,a.userId,next==='approved'?`Заявка на ${workDate} подтверждена`:`Заявка на ${workDate} отклонена: ${reason}`);await audit(db,id,a.userId,next==='approved'?'shift_approved':'shift_rejected',workDate,{reason:next==='rejected'?reason:null});return json({ok:true})}if(a.type==='cancel'){const s=await db.prepare('SELECT in_at FROM shifts WHERE user_id=? AND work_date=?').bind(id,workDate).first();if(!s)return fail('Смена не найдена',404);if(s.in_at)return fail('Отмеченную смену нельзя отменить',409);await db.prepare('DELETE FROM shifts WHERE user_id=? AND work_date=? AND in_at IS NULL').bind(id,workDate).run();await log(db,`${m.name} отменил интервал`);await audit(db,id,id,'shift_cancelled',workDate);return json({ok:true})}
 if(a.type==='clockIn'&&workDate!==today)return fail('Приход доступен только в день смены',409);if(a.type==='clockIn'){const s=await db.prepare('SELECT in_at,status,start,end FROM shifts WHERE user_id=? AND work_date=?').bind(id,workDate).first();if(!s||s.in_at||s.status!=='approved')return fail('Нужна подтверждённая заявка',409);if(moscowMinute()<s.start*60||moscowMinute()>=s.end*60)return fail('Приход можно отметить только в согласованный интервал',409);const codeError=await verifyAttendanceCode(db,id,today,a.code);if(codeError)return fail(codeError,409);const r=await db.prepare("UPDATE shifts SET in_at=? WHERE user_id=? AND work_date=? AND in_at IS NULL AND status='approved'").bind(new Date().toISOString(),id,workDate).run();if(!r.meta.changes)return fail('Обновите страницу',409);await log(db,`${m.name} отметил приход`);await audit(db,id,id,'clock_in',workDate,{verified:'code'});return json({ok:true})}
 if(a.type==='clockOut'){const s=await db.prepare('SELECT in_at,out_at FROM shifts WHERE user_id=? AND work_date=?').bind(id,workDate).first();if(!s?.in_at||s.out_at)return fail('Нет открытой смены',409);if(workDate!==today&&addDays(workDate,1)!==today)return fail('Закрытие смены доступно до конца следующего дня',409);const now=new Date(),underFive=now-new Date(s.in_at)<5*3600000,reason=typeof a.reason==='string'?a.reason.trim():'';if(underFive&&(reason.length<3||reason.length>200))return fail('Укажите причину короткого выхода: от 3 до 200 символов');const codeError=await verifyAttendanceCode(db,id,today,a.code);if(codeError)return fail(codeError,409);const r=await db.prepare('UPDATE shifts SET out_at=?,short_reason=? WHERE user_id=? AND work_date=? AND in_at IS NOT NULL AND out_at IS NULL').bind(now.toISOString(),underFive?reason:null,id,workDate).run();if(!r.meta.changes)return fail('Обновите страницу',409);await log(db,`${m.name} отметил уход`);if(underFive)await notifyManagers(db,`${m.name} завершил смену ${workDate} раньше пяти часов: ${reason}`);await audit(db,id,id,'clock_out',workDate,{verified:'code',underFive,reason:underFive?reason:null});return json({ok:true})}
