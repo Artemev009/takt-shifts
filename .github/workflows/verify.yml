@@ -23,3 +23,5 @@ jobs:
         run: bash scripts/build.sh
       - name: Check shift workflow
         run: node tests/workflow.mjs
+      - name: Check standalone deployment safety
+        run: node tests/deployment.mjs
