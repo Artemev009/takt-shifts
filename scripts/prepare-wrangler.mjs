@@ -21,6 +21,7 @@ const config={
     database_name:databaseName,
     database_id:databaseId,
     migrations_dir:'drizzle',
+    migrations_pattern:'drizzle/*.sql',
   }],
   vars:{TRUST_OAI_HEADERS:'false'},
 };
