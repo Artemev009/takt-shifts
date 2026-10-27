@@ -25,3 +25,5 @@ jobs:
         run: node tests/workflow.mjs
       - name: Check standalone deployment safety
         run: node tests/deployment.mjs
+      - name: Test public deployment verification with mocked Worker
+        run: node tests/public-smoke.mjs

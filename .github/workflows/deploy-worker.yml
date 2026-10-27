@@ -53,4 +53,8 @@ jobs:
           trap 'rm -f .wrangler/bootstrap-manager.sql' EXIT
           npx --yes wrangler@4 d1 execute DB --remote --file=.wrangler/bootstrap-manager.sql
       - name: Publish independent HTTPS web app
-        run: npx --yes wrangler@4 deploy
+        run: |
+          mkdir -p .wrangler
+          npx --yes wrangler@4 deploy 2>&1 | tee .wrangler/deploy-output.log
+      - name: Verify production website and show real address
+        run: node scripts/verify-public.mjs
