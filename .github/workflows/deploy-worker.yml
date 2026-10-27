@@ -67,13 +67,8 @@ jobs:
           chmod 600 .wrangler/current-manager.json
           node scripts/rehash-manager.mjs
           npx --yes wrangler@4 d1 execute DB --remote --json --file=.wrangler/rehash-manager.sql > .wrangler/rehash-result.json
-          node --input-type=module <<'JS'
-          import {readFileSync} from 'node:fs';
-          const responses=JSON.parse(readFileSync('.wrangler/rehash-result.json','utf8'));
-          const rows=(Array.isArray(responses)?responses:[responses]).flatMap(x=>x.results||[]);
-          if(!rows.some(row=>row.result==='rehash-complete'))throw Error('Manager hash migration was not confirmed; deployment blocked');
-          console.log('Existing manager password preserved and hash migrated to Cloudflare-supported PBKDF2.');
-          JS
+          npx --yes wrangler@4 d1 execute DB --remote --json --command="SELECT username,salt,password_hash,must_change_password FROM password_accounts WHERE user_id='takt-primary-manager'" > .wrangler/current-manager.json
+          TAKT_VERIFY_MANAGER_ONLY=1 node scripts/rehash-manager.mjs
       - name: Publish independent HTTPS web app
         shell: bash
         run: |
