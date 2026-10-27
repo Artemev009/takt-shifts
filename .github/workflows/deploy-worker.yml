@@ -53,8 +53,22 @@ jobs:
           trap 'rm -f .wrangler/bootstrap-manager.sql' EXIT
           npx --yes wrangler@4 d1 execute DB --remote --file=.wrangler/bootstrap-manager.sql
       - name: Publish independent HTTPS web app
+        shell: bash
         run: |
+          set -Eeuo pipefail
           mkdir -p .wrangler
-          npx --yes wrangler@4 deploy 2>&1 | tee .wrangler/deploy-output.log
+          for attempt in 1 2 3; do
+            echo "Cloudflare deployment attempt ${attempt}/3"
+            if npx --yes wrangler@4 deploy 2>&1 | tee .wrangler/deploy-output.log; then
+              echo "Worker successfully deployed."
+              exit 0
+            fi
+            if [[ ${attempt} -eq 3 ]] || ! grep -Fq 'binding DB of type d1 failed to generate' .wrangler/deploy-output.log; then
+              echo "::error::Wrangler failed to deploy the Worker. Inspect the error above."
+              exit 1
+            fi
+            echo "::warning::Cloudflare D1 binding generation failed. Retrying deployment."
+            sleep $((attempt * 15))
+          done
       - name: Verify production website and show real address
         run: node scripts/verify-public.mjs

@@ -37,5 +37,8 @@ try{
  assert.equal(match[2],pbkdf2Sync(password,Buffer.from(match[1],'utf8'),180000,32,'sha256').toString('hex'));
  result=exec('scripts/bootstrap-manager.mjs',{TAKT_MANAGER_USERNAME:'manager.test',TAKT_MANAGER_PASSWORD:'123'});
  assert.notEqual(result.status,0,'weak bootstrap password is rejected');
+ const deployWorkflow=readFileSync(join(root,'.github/workflows/deploy-worker.yml'),'utf8');
+ assert.match(deployWorkflow,/set -Eeuo pipefail/,'deploy must fail when Wrangler fails inside tee pipeline');
+ assert.match(deployWorkflow,/grep -Fq 'binding DB of type d1 failed to generate'/,'retry only the observed Cloudflare D1 binding error');
  console.log('Standalone deployment config and manager bootstrap checks passed');
 }finally{rmSync(temp,{recursive:true,force:true})}
