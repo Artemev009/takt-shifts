@@ -4,10 +4,11 @@ const match=log.match(/https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev\/?/i);
 if(!match)throw Error('Wrangler deployment log did not contain a workers.dev URL');
 const base=match[0].replace(/\/?$/,'/');
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const maxAttempts=16;
 let last='';
-for(let attempt=0;attempt<6;attempt++){
+for(let attempt=0;attempt<maxAttempts;attempt++){
   try{
-    const options={redirect:'error',cache:'no-store',signal:AbortSignal.timeout(12000)};
+    const options={redirect:'error',cache:'no-store',signal:AbortSignal.timeout(15000)};
     const health=await fetch(base+'healthz',options);
     const ready=await health.json();
     if(health.status!==200||ready.ready!==true)throw Error('Server/database readiness failed: '+health.status);
@@ -22,6 +23,10 @@ for(let attempt=0;attempt<6;attempt++){
     console.log('Verified public app: '+base);
     if(process.env.GITHUB_STEP_SUMMARY)appendFileSync(process.env.GITHUB_STEP_SUMMARY,'\n### Такт — публичное веб-приложение\n\n'+base+'\n\nСервер, D1, вход, PWA и закрытый API: проверены.\n');
     process.exit(0);
-  }catch(e){last=e.message;await sleep(2000*(attempt+1));}
+  }catch(e){
+    last=String(e.message||e)+(e.cause?.code?' ('+e.cause.code+')':'');
+    console.warn('Public URL check '+(attempt+1)+'/'+maxAttempts+': '+last);
+    if(attempt<maxAttempts-1)await sleep(10000);
+  }
 }
 throw Error('Published app did not pass verification: '+last);
