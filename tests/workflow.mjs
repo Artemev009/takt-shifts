@@ -236,7 +236,7 @@ const employeeUi = await renderClient(employee);
 const managerRequestsUi = await renderClient(manager, 'requests');
 const employeeRequestsUi = await renderClient(employee, 'requests');
 assert.match(managerUi, /Сотрудники и заявки/);
-assert.match(managerUi, /Задать потребность/);
+assert.match(managerUi, /Настроить потребность/);
 assert.match(managerUi, /Требует внимания/);
 assert.match(employeeUi, /Мои заявки/);
 assert.match(managerRequestsUi, /Доступность команды/);
