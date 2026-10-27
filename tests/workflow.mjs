@@ -123,10 +123,31 @@ assert.equal((await health()).status,503,'SSO by itself is not enough for passwo
 assert.equal((await call(manager,'POST','/api/admin/password',{username:'pilot.manager',password:'SecureManager2026!'})).status,200,'manager sets password while trusted SSO is available');
 assert.equal((await health()).status,200,'D1 migrations and password-enabled manager are ready');
 assert.deepEqual(await (await health()).json(),{ready:true});
-const managerPasswordLogin=await app.fetch(new Request('https://example.test/api/auth/login',{
-  method:'POST',headers:{'content-type':'application/json'},
-  body:JSON.stringify({username:'pilot.manager',password:'SecureManager2026!'})
-}),{...env,TRUST_OAI_HEADERS:'false'});
+// Simulate the 100,000-iteration cap enforced by production Cloudflare Workers.
+const originalCryptoDescriptor=Object.getOwnPropertyDescriptor(globalThis,'crypto');
+const originalCrypto=globalThis.crypto;
+const originalSubtle=originalCrypto.subtle;
+Object.defineProperty(globalThis,'crypto',{configurable:true,value:{
+  getRandomValues:originalCrypto.getRandomValues.bind(originalCrypto),
+  subtle:{
+    importKey:originalSubtle.importKey.bind(originalSubtle),
+    digest:originalSubtle.digest.bind(originalSubtle),
+    deriveBits:async (params,...args)=>{
+      if(params?.name==='PBKDF2'&&params.iterations>100000)throw Error('Pbkdf2 failed: iteration counts above 100000 are not supported (requested 180000).');
+      return originalSubtle.deriveBits(params,...args);
+    }
+  }
+}});
+let managerPasswordLogin;
+try{
+  managerPasswordLogin=await app.fetch(new Request('https://example.test/api/auth/login',{
+    method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({username:'pilot.manager',password:'SecureManager2026!'})
+  }),{...env,TRUST_OAI_HEADERS:'false'});
+}finally{
+  if(originalCryptoDescriptor)Object.defineProperty(globalThis,'crypto',originalCryptoDescriptor);
+  else delete globalThis.crypto;
+}
 assert.equal(managerPasswordLogin.status,200,'manager can log in without ChatGPT SSO');
 const managerCookie=managerPasswordLogin.headers.get('set-cookie').split(';')[0];
 const managerPasswordAdmin=await app.fetch(new Request('https://example.test/api/admin/users',{headers:{cookie:managerCookie}}),{...env,TRUST_OAI_HEADERS:'false'});
