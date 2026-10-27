@@ -37,3 +37,44 @@ jobs:
             await probe('login-'+i,'/api/auth/login',{method:'POST',headers,body:JSON.stringify({username:'probe.not.real.'+i,password:'not-a-real-password'})});
           }
           JS
+
+  local-workerd:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_ACCOUNT_ID: 0123456789abcdef0123456789abcdef
+      CLOUDFLARE_D1_DATABASE_ID: 123e4567-e89b-42d3-a456-426614174000
+      TAKT_MANAGER_USERNAME: test.manager
+      TAKT_MANAGER_PASSWORD: SyntheticOnlyPassword2026!
+      TAKT_MANAGER_NAME: Test Manager
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Start a local Cloudflare runtime and test login
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/build.sh
+          node scripts/prepare-wrangler.mjs
+          npx --yes wrangler@4 d1 migrations apply DB --local
+          node scripts/bootstrap-manager.mjs
+          npx --yes wrangler@4 d1 execute DB --local --file=.wrangler/bootstrap-manager.sql
+          npx --yes wrangler@4 dev --local --port 8787 > /tmp/takt-local-worker.log 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true; tail -n 45 /tmp/takt-local-worker.log' EXIT
+          for i in $(seq 1 18); do
+            if curl -fsS http://127.0.0.1:8787/healthz > /tmp/takt-health.json; then break; fi
+            sleep 2
+          done
+          cat /tmp/takt-health.json
+          node --input-type=module <<'JS'
+          const host='http://127.0.0.1:8787';
+          for(const [name,pw] of [['wrong','not-the-password'],['valid','SyntheticOnlyPassword2026!']]){
+            const response=await fetch(host+'/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:'test.manager',password:pw})});
+            const result=await response.text();
+            console.log('Cloudflare local login '+name+': HTTP '+response.status+' ('+response.headers.get('content-type')+') '+result.slice(0,230));
+            if(name==='wrong'&&response.status!==401)process.exitCode=1;
+            if(name==='valid'&&response.status!==200)process.exitCode=1;
+          }
+          JS
