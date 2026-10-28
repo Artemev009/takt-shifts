@@ -288,12 +288,20 @@ async function renderClient(email, page = 'overview') {
   const document = { getElementById: id => id === 'app' ? root : null, body: { classList: { toggle() {} } } };
   const localStorage = { getItem() { return null; }, setItem() {} };
   const fetch = (path, options = {}) => call(email, options.method || 'GET', path, options.body ? JSON.parse(options.body) : undefined);
-  runInNewContext(clientScript, { document, localStorage, fetch, Date, Intl, URL, setInterval() {}, window: { addEventListener() {} }, console });
+  runInNewContext(clientScript, { document, localStorage, fetch, Date, Intl, URL, AbortController, setTimeout, clearTimeout, setInterval() {}, window: { addEventListener() {} }, console });
   await new Promise(resolve => setTimeout(resolve, 50));
   if (page !== 'overview') await root.click({ target: { closest: () => ({ dataset: { page } }) } });
   return root.innerHTML;
 }
 const managerUi = await renderClient(manager);
+{
+  const root = { innerHTML: '', addEventListener() {} };
+  const document = { getElementById: id => id === 'app' ? root : null, body: { classList: { toggle() {} } } };
+  runInNewContext(clientScript, { document, localStorage: { getItem() { return null; } }, fetch: async () => { throw new TypeError('network'); }, Date, Intl, URL, AbortController, setTimeout, clearTimeout, setInterval() {}, window: { addEventListener() {} }, console });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.match(root.innerHTML, /Не удалось открыть кабинет/);
+  assert.match(root.innerHTML, /Повторить/);
+}
 const employeeUi = await renderClient(employee);
 const managerRequestsUi = await renderClient(manager, 'requests');
 const employeeRequestsUi = await renderClient(employee, 'requests');
