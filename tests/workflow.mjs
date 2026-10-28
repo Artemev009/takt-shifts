@@ -86,8 +86,38 @@ async function call(email, method, path, body) {
 const view = async (email, date = today) => (await call(email, 'GET', '/api/state?date=' + date)).json();
 const action = (email, type, date = today, details = {}) => call(email, 'POST', '/api/action', { type, date, ...details });
 const login = await app.fetch(new Request('https://example.test/'), env);
-assert.match(await login.text(), /Войти в личный кабинет/);
+const loginHtml = await login.text();
+assert.match(loginHtml, /Войти в личный кабинет/);
 assert.match(login.headers.get('content-security-policy'), /frame-ancestors 'none'/, 'HTML has security headers');
+const loginScript = loginHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+assert.ok(loginScript, 'login form handler is present');
+let submitLogin, abortRequest, expireRequest;
+const loginError = { textContent: '' }, loginButton = { disabled: false };
+const loginForm = {
+  elements: { username: { value: 'diagnostic' }, password: { value: 'unused' } },
+  querySelector: () => loginButton,
+};
+runInNewContext(loginScript, {
+  document: { getElementById: id => id === 'loginForm'
+    ? { addEventListener: (_event, handler) => { submitLogin = handler; } }
+    : loginError },
+  fetch: () => new Promise((_resolve, reject) => { abortRequest = reject; }),
+  AbortController: class {
+    signal = {};
+    abort() { abortRequest(Object.assign(new Error('timeout'), { name: 'AbortError' })); }
+  },
+  setTimeout: handler => { expireRequest = handler; return 1; },
+  clearTimeout: () => {},
+});
+const pendingLogin = submitLogin({ preventDefault() {}, target: loginForm });
+assert.equal(loginButton.disabled, true);
+expireRequest();
+await pendingLogin;
+assert.equal(loginButton.disabled, false, 'a stalled login can be retried');
+assert.match(loginError.textContent, /15 секунд/, 'a stalled login shows a useful error');
+const dottedHost = await app.fetch(new Request('https://example.test./?source=bookmark'), { ...env, DB: null });
+assert.equal(dottedHost.status, 308, 'a trailing-dot bookmark redirects before login');
+assert.equal(dottedHost.headers.get('location'), 'https://example.test/?source=bookmark');
 const manifestResponse = await app.fetch(new Request('https://example.test/manifest.webmanifest'), env);
 const manifest = await manifestResponse.json();
 assert.equal(manifest.display, 'standalone', 'PWA opens without browser chrome');
